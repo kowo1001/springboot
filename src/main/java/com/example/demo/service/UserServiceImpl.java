@@ -6,16 +6,29 @@ import java.util.List;
 import java.util.Optional;
 import java.util.stream.Collectors;
 
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
 import javax.transaction.Transactional;
 
+import com.example.demo.dto.LoginDto;
 import com.example.demo.dto.UserDto;
 import com.example.demo.entity.Manager;
 import com.example.demo.entity.Member;
 import com.example.demo.entity.User;
+import com.example.demo.jwt.JwtFilter;
+import com.example.demo.jwt.TokenProvider;
 import com.example.demo.repository.UserRepository;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.config.annotation.authentication.builders.AuthenticationManagerBuilder;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
@@ -23,10 +36,57 @@ import org.springframework.web.multipart.MultipartFile;
 public class UserServiceImpl implements UserService {
 
     private final Logger logger = LoggerFactory.getLogger(this.getClass());
+    private final TokenProvider tokenProvider;
     private final UserRepository userRepository;
+    private final PasswordEncoder passwordEncoder;
+    private final AuthenticationManagerBuilder authenticationManagerBuilder;
 
-    public UserServiceImpl(UserRepository userRepository) {
+    public UserServiceImpl(UserRepository userRepository, PasswordEncoder passwordEncoder, TokenProvider tokenProvider,
+            AuthenticationManagerBuilder authenticationManagerBuilder) {
         this.userRepository = userRepository;
+        this.passwordEncoder = passwordEncoder;
+        this.tokenProvider = tokenProvider;
+        this.authenticationManagerBuilder = authenticationManagerBuilder;
+    }
+
+    @Override
+    public ResponseEntity<UserDto> login(LoginDto loginDto, HttpServletResponse res) {
+        UsernamePasswordAuthenticationToken authenticationToken = new UsernamePasswordAuthenticationToken(
+                loginDto.getUserId(), loginDto.getPassword());
+        Authentication authentication = authenticationManagerBuilder.getObject().authenticate(authenticationToken);
+
+        SecurityContextHolder.getContext().setAuthentication(authentication);
+        String jwt = tokenProvider.createToken(authentication);
+
+        HttpHeaders httpHeaders = new HttpHeaders();
+        httpHeaders.add(JwtFilter.AUTHORIZATION_HEADER, "Bearer" + jwt);
+
+        Optional<User> userOpt = userRepository.findById(authentication.getName());
+
+        if (userOpt.isPresent()) {
+            User user = userOpt.get();
+            UserDto userDto = UserDto.builder().userId(user.getUserId()).userName(user.getUserName())
+                    .phoneNumber(user.getPhoneNumber()).userImage(user.getUserImage()).role(user.getRole()).build();
+
+            logger.info("로그인 유저 정보 요청 성공");
+            return new ResponseEntity<>(userDto, httpHeaders, HttpStatus.OK);
+        } else {
+            logger.info("로그인 유저 정보 요청 실패");
+            return null;
+        }
+    }
+
+    @Override
+    public Boolean logout(HttpServletRequest req) {
+
+        try {
+            logger.info("로그아웃 성공");
+            return true;
+        } catch (Exception e) {
+            e.printStackTrace();
+            logger.error("로그아웃 실패");
+            return false;
+        }
     }
 
     public Boolean insertUser(UserDto userDto, MultipartFile mfile) {
@@ -49,7 +109,7 @@ public class UserServiceImpl implements UserService {
                 if (userDto.getRole().equals("member")) {
                     Member member = new Member();
                     member.setUserId(userDto.getUserId());
-                    member.setPassword(userDto.getPassword());
+                    member.setPassword(passwordEncoder.encode(userDto.getPassword()));
                     member.setUserName(userDto.getUserName());
                     member.setPhoneNumber(userDto.getPhoneNumber());
                     member.setUserImage(userDto.getUserImage());
@@ -61,7 +121,7 @@ public class UserServiceImpl implements UserService {
                 } else if (userDto.getRole().equals("admin")) {
                     Manager manager = new Manager();
                     manager.setUserId(userDto.getUserId());
-                    manager.setPassword(userDto.getPassword());
+                    manager.setPassword(passwordEncoder.encode(userDto.getPassword()));
                     manager.setUserName(userDto.getUserName());
                     manager.setPhoneNumber(userDto.getPhoneNumber());
                     manager.setUserImage(userDto.getUserImage());
@@ -94,7 +154,7 @@ public class UserServiceImpl implements UserService {
                 if (userDto.getRole().equals("member")) {
                     Member member = new Member();
                     member.setUserId(userDto.getUserId());
-                    member.setPassword(userDto.getPassword());
+                    member.setPassword(passwordEncoder.encode(userDto.getPassword()));
                     member.setUserName(userDto.getUserName());
                     member.setPhoneNumber(userDto.getPhoneNumber());
                     member.setUserImage("default.png");
@@ -105,7 +165,7 @@ public class UserServiceImpl implements UserService {
                 } else if (userDto.getRole().equals("manager")) {
                     Manager manager = new Manager();
                     manager.setUserId(userDto.getUserId());
-                    manager.setPassword(userDto.getPassword());
+                    manager.setPassword(passwordEncoder.encode(userDto.getPassword()));
                     manager.setUserName(userDto.getUserName());
                     manager.setPhoneNumber(userDto.getPhoneNumber());
                     manager.setUserImage("default.png");
@@ -130,12 +190,14 @@ public class UserServiceImpl implements UserService {
 
     @Override
     public UserDto getUser(String userid) {
-        Optional<User> findUser = userRepository.findById(userid); // 조금 이상함
+        Optional<User> findUser = userRepository.findById(userid);
 
         if (findUser.isPresent()) {
             User user = findUser.get();
-            UserDto userDto = UserDto.builder().userId(user.getUserId()).userName(user.getUserName())
-                    .phoneNumber(user.getPhoneNumber()).userImage(user.getUserImage()).role(user.getRole()).build();
+            UserDto userDto = UserDto.builder().userId(user.getUserId()).password(user.getPassword())
+                    .userName(user.getUserName()).phoneNumber(user.getPhoneNumber()).userImage(user.getUserImage())
+                    .role(user.getRole()).build();
+
             logger.info("{} 회원 조회 요청 성공", userid);
             return userDto;
         } else {
@@ -146,8 +208,8 @@ public class UserServiceImpl implements UserService {
 
     @Override
     public List<UserDto> getUserList() {
-        List<User> userList = userRepository.findAllUserByRole("ROLE_MEMBER");
-        List<UserDto> uDtoList = userList.stream().map(u -> new UserDto(u.getUserId(), null, u.getUserName(),
+        List<User> userList = userRepository.findAllUserByRole("ROLE_MANAGER");
+        List<UserDto> uDtoList = userList.stream().map(u -> new UserDto(u.getUserId(), u.getPassword(), u.getUserName(),
                 u.getPhoneNumber(), u.getUserImage(), u.getRole())).collect(Collectors.toList());
 
         logger.info("전체 회원 조회");
@@ -184,7 +246,7 @@ public class UserServiceImpl implements UserService {
                 }
                 User user = findUser.get();
                 user.setUserId(userDto.getUserName());
-                user.setPassword(userDto.getPassword());
+                user.setPassword(passwordEncoder.encode(userDto.getPassword()));
                 user.setUserName(userDto.getUserName());
                 user.setPhoneNumber(userDto.getPhoneNumber());
                 user.setUserImage(userDto.getUserImage());
@@ -211,7 +273,7 @@ public class UserServiceImpl implements UserService {
             if (findUser.isPresent()) {
                 User user = findUser.get();
                 user.setUserId(userDto.getUserId());
-                user.setPassword(userDto.getPassword());
+                user.setPassword(passwordEncoder.encode(userDto.getPassword()));
                 user.setUserName(userDto.getUserName());
                 user.setPhoneNumber(userDto.getPhoneNumber());
 
@@ -258,4 +320,5 @@ public class UserServiceImpl implements UserService {
             return false;
         }
     }
+
 }
